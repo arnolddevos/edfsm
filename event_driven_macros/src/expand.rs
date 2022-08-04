@@ -147,12 +147,12 @@ pub fn expand(fsm: &mut Fsm) -> Result<TokenStream> {
         .unwrap(),
         parse2::<ImplItem>(quote!(
             fn for_event(
-                s: &#state_enum,
+                s: #state_enum,
                 e: &#event_enum,
-            ) -> Option<#state_enum> {
+            ) -> Transition<#state_enum> {
                 match (s, e) {
                     #( #event_matches )*
-                    _ => None,
+                    (s, _) => Transition::Same(s),
                 }
             }
         ))

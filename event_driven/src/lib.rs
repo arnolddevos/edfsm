@@ -34,7 +34,7 @@ pub trait Fsm<S, C, E, SE> {
     /// Given a state and event, produce a transition, which could transition to
     /// the next state. No side effects are to be performed. Can be used to replay
     /// events to attain a new state i.e. the major function of event sourcing.
-    fn for_event(s: &S, e: &E) -> Option<S>;
+    fn for_event(s: S, e: &E) -> Transition<S>;
 
     /// Optional effect on exiting a state.
     fn on_exit(_s: &S, _se: &mut SE) {}
@@ -47,19 +47,36 @@ pub trait Fsm<S, C, E, SE> {
     /// producing an event and transitioning to a new state. Also
     /// applies any "Entry/" or "Exit/" processing when arriving
     /// at a new state.
-    fn step(s: &S, c: C, se: &mut SE) -> (Option<E>, Option<S>) {
-        let e = Self::for_command(s, c, se);
+    fn step(s: S, c: C, se: &mut SE) -> (Option<E>, Transition<S>) {
+        let e = Self::for_command(&s, c, se);
         let t = if let Some(e) = &e {
+            Self::on_exit(&s, se);
             let t = Self::for_event(s, e);
-            if let Some(new_s) = &t {
-                Self::on_exit(s, se);
+            if let Transition::New(new_s) = &t {
                 Self::on_entry(new_s, se);
             };
             t
         } else {
-            None
+            Transition::Same(s)
         };
         (e, t)
+    }
+}
+
+/// A state transition result.  `Same` indicates that no transition occured and
+/// the state contained is the original state. `New` indicates that the state may
+/// have changed and the state contained may be different to the original.
+pub enum Transition<S> {
+    New(S),
+    Same(S),
+}
+
+impl<S> Transition<S> {
+    pub fn map<T>(self, f: impl FnOnce(S) -> T) -> Transition<T> {
+        match self {
+            Transition::New(s) => Transition::New(f(s)),
+            Transition::Same(s) => Transition::Same(f(s)),
+        }
     }
 }
 
@@ -136,7 +153,7 @@ mod tests {
                 }
             }
 
-            fn for_event(s: &State, e: &Event) -> Option<State> {
+            fn for_event(s: State, e: &Event) -> Transition<State> {
                 match (s, e) {
                     (State::Running(s), Event::Stopped(e)) => {
                         Self::for_running_stopped_idle(s, e).map(|r| State::Idle(r))
@@ -144,7 +161,7 @@ mod tests {
                     (State::Idle(s), Event::Started(e)) => {
                         Self::for_idle_started_running(s, e).map(|r| State::Running(r))
                     }
-                    _ => None,
+                    (s, _) => Transition::Same(s),
                 }
             }
 
@@ -188,12 +205,12 @@ mod tests {
                 Some(Started)
             }
 
-            fn for_running_stopped_idle(_s: &Running, _e: &Stopped) -> Option<Idle> {
-                Some(Idle)
+            fn for_running_stopped_idle(_s: Running, _e: &Stopped) -> Transition<Idle> {
+                Transition::New(Idle)
             }
 
-            fn for_idle_started_running(_s: &Idle, _e: &Started) -> Option<Running> {
-                Some(Running)
+            fn for_idle_started_running(_s: Idle, _e: &Started) -> Transition<Running> {
+                Transition::New(Running)
             }
 
             fn on_exit_running(_old_s: &Running, se: &mut EffectHandlers) {
@@ -216,33 +233,33 @@ mod tests {
 
         // Finally, test the FSM by stepping through various states
 
-        let (e, t) = MyFsm::step(&State::Idle(Idle), Command::Start(Start), &mut se);
+        let (e, t) = MyFsm::step(State::Idle(Idle), Command::Start(Start), &mut se);
         assert!(matches!(e, Some(Event::Started(Started))));
-        assert!(matches!(t, Some(State::Running(Running))));
+        assert!(matches!(t, Transition::New(State::Running(Running))));
         assert_eq!(se.started, 1);
         assert_eq!(se.stopped, 0);
         assert_eq!(se.transitioned_started_to_stopped, 0);
         assert_eq!(se.transitioned_stopped_to_started, 1);
 
-        let (e, t) = MyFsm::step(&State::Running(Running), Command::Start(Start), &mut se);
+        let (e, t) = MyFsm::step(State::Running(Running), Command::Start(Start), &mut se);
         assert!(e.is_none());
-        assert!(t.is_none());
+        assert!(matches!(t, Transition::Same(_)));
         assert_eq!(se.started, 1);
         assert_eq!(se.stopped, 0);
         assert_eq!(se.transitioned_started_to_stopped, 0);
         assert_eq!(se.transitioned_stopped_to_started, 1);
 
-        let (e, t) = MyFsm::step(&State::Running(Running), Command::Stop(Stop), &mut se);
+        let (e, t) = MyFsm::step(State::Running(Running), Command::Stop(Stop), &mut se);
         assert!(matches!(e, Some(Event::Stopped(Stopped))));
-        assert!(matches!(t, Some(State::Idle(Idle))));
+        assert!(matches!(t, Transition::New(State::Idle(Idle))));
         assert_eq!(se.started, 1);
         assert_eq!(se.stopped, 1);
         assert_eq!(se.transitioned_started_to_stopped, 1);
         assert_eq!(se.transitioned_stopped_to_started, 1);
 
-        let (e, t) = MyFsm::step(&&State::Idle(Idle), Command::Stop(Stop), &mut se);
+        let (e, t) = MyFsm::step(State::Idle(Idle), Command::Stop(Stop), &mut se);
         assert!(e.is_none());
-        assert!(t.is_none());
+        assert!(matches!(t, Transition::Same(_)));
         assert_eq!(se.started, 1);
         assert_eq!(se.stopped, 1);
         assert_eq!(se.transitioned_started_to_stopped, 1);
